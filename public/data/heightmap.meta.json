@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "size": 1536,
+  "extentKm": 600.0,
+  "radiusKm": 1737.4,
+  "minKm": -7.266646862030029,
+  "maxKm": 7.015751838684082,
+  "source": "LOLA LDEM_80S_80MPP_ADJ (NASA PGDA, 80 m/px, \u00b1300 km window)"
+}

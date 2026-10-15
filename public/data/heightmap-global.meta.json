@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "width": 1440,
+  "height": 720,
+  "radiusKm": 1737.4,
+  "minKm": -8.878499984741211,
+  "maxKm": 10.503999710083008,
+  "source": "LOLA LDEM_4 (NASA PDS, 4 px/deg global)"
+}

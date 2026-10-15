@@ -1,0 +1,11 @@
+[project]
+name = "southwatch-pipeline"
+version = "0.1.0"
+description = "Offline data pipeline for SouthWatch: LOLA DEM -> heightmap.bin, SPICE -> golden test fixtures"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "rasterio",   # GDAL bindings, reads the LOLA GeoTIFF
+  "pyproj",     # projection sanity checks
+  "spiceypy",   # NAIF SPICE, for the golden test values
+]
