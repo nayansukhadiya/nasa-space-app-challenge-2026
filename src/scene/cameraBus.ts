@@ -7,6 +7,8 @@ export const cameraBus: {
   tilt: (deltaRad: number) => void;
   turn: (deltaRad: number) => void;
   home: () => void;
+  /** Fly the orbit camera to a lat/lon (pan + zoom), Google/Apple-maps style. No-op until mounted. */
+  flyTo: (latDeg: number, lonDeg: number, opts?: { distanceKm?: number }) => void;
   /** Ground view only: turn to face Earth, the Sun or a compass point. */
   look: (what: "earth" | "sun" | "n" | "e" | "s" | "w") => void;
   /** Ground view only: change the field of view (multiplier). */
@@ -16,6 +18,7 @@ export const cameraBus: {
   tilt: () => {},
   turn: () => {},
   home: () => {},
+  flyTo: () => {},
   look: () => {},
   fov: () => {},
 };

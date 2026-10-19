@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect } from "react";
-import { type FrameMode, type TabId, type ViewMode, useSim } from "@/store/sim";
+import { useEffect, useRef } from "react";
+import { type FrameMode, SUBTABS, type TabId, type ViewMode, useSim } from "@/store/sim";
+import { useLayers } from "@/store/layers";
 import { useWorld } from "@/store/world";
+import { layerById } from "./layerCatalog";
 
 const VIEWS: ViewMode[] = ["3d", "2d", "ground"];
 const FRAMES: FrameMode[] = ["pole", "cap", "globe"];
-const TABS: TabId[] = ["illumination", "comms", "missions", "relay"];
+// Every tab the store knows about, so a new tab can never be silently dropped from shared links.
+const TABS = Object.keys(SUBTABS) as TabId[];
 
 /** ISO time without milliseconds, e.g. 2026-11-14T00:00:00Z */
 const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -17,6 +20,9 @@ const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z
  */
 export function useUrlState(): void {
   const status = useWorld((s) => s.status);
+  // The URL is only written after the link has been read back, or an early state change (before the terrain finishes
+  // loading) would overwrite the shared link with defaults and lose it.
+  const restored = useRef(false);
 
   // Restore once the world is ready.
   useEffect(() => {
@@ -29,6 +35,8 @@ export function useUrlState(): void {
     const t = q.get("t");
     const site = q.get("site");
     const probe = q.get("probe");
+    const layer = q.get("layer");
+    if (layer && layerById(layer)) useLayers.getState().setActive(layer);
     if (view && VIEWS.includes(view)) sim.setView(view);
     if (frame && FRAMES.includes(frame)) sim.setFrame(frame);
     if (tab && TABS.includes(tab)) sim.setTab(tab);
@@ -41,7 +49,10 @@ export function useUrlState(): void {
     }
     if (site && useWorld.getState().sites[site]) {
       sim.selectSite(site);
-      if (useWorld.getState().missions.some((m) => m.id === site)) sim.selectMission(site);
+      if (useWorld.getState().missions.some((m) => m.id === site)) {
+        sim.selectMission(site);
+        sim.setFocus(site);
+      }
     }
     if (probe) {
       const [lat, lon] = probe.split(",").map(Number);
@@ -52,18 +63,23 @@ export function useUrlState(): void {
           .then(() => useSim.getState().selectSite("probe"));
       }
     }
+    restored.current = true;
   }, [status]);
 
   // Keep the URL in step (throttled), without adding history entries.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const write = () => {
+      if (!restored.current) return;
       const s = useSim.getState();
       const q = new URLSearchParams(window.location.search);
       q.set("view", s.view);
       q.set("frame", s.frame);
       q.set("tab", s.tab);
       q.set("t", iso(s.tMs));
+      const lay = useLayers.getState().activeId;
+      if (lay) q.set("layer", lay);
+      else q.delete("layer");
       const probeEntry = useWorld.getState().sites.probe;
       if (s.selectedSiteId === "probe" && probeEntry) {
         q.delete("site");
@@ -74,12 +90,15 @@ export function useUrlState(): void {
       }
       window.history.replaceState(null, "", `${window.location.pathname}?${q.toString()}`);
     };
-    const unsub = useSim.subscribe(() => {
+    const onChange = () => {
       clearTimeout(timer);
       timer = setTimeout(write, 600);
-    });
+    };
+    const unsub = useSim.subscribe(onChange);
+    const unsubLayers = useLayers.subscribe(onChange);
     return () => {
       unsub();
+      unsubLayers();
       clearTimeout(timer);
     };
   }, []);

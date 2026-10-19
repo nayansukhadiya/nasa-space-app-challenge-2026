@@ -1,19 +1,27 @@
 import { DEG, RAD } from "@/astro/constants";
-import { HORIZON_SAMPLES, type HorizonMask } from "@/astro/horizon";
+import { HORIZON_SAMPLES, HORIZON_STEP_DEG, type HorizonMask } from "@/astro/horizon";
 import { localBasis } from "@/astro/site";
 import type { HeightSource } from "./heightmap";
+
+/**
+ * Farthest distance at which terrain can still block the sky, km. A point of height h is hidden by curvature beyond
+ * d = √(2R·h₀) + √(2R·h); the Moon's highest relief is ≈ 11 km above the 1737.4 km sphere, giving ≈ 195 km for a
+ * ground-level observer and ≈ 200 km for one on a 50 m mast. 250 km leaves margin, so marching farther can never
+ * change a mask, it only costs time (the polar maps are ~930 km wide, so the old default marched up to 1,400 km).
+ */
+export const MAX_VISIBLE_RANGE_KM = 250;
 
 export interface HorizonOptions {
   /** Antenna / eye height above the local surface, km. Default 0. */
   observerHeightKm?: number;
-  /** Stop marching this far from the site, km. Default: as far as the map allows. */
+  /** Stop marching this far from the site, km. Default: the curvature limit (250 km) or the map edge. */
   maxRangeKm?: number;
   /** Fixed march step, km. Default: the finest pixel size, growing with distance (0.15 % of range). */
   stepKm?: number;
 }
 
 /**
- * COMPUTED from MEASURED terrain: for each whole degree of azimuth, the highest
+ * COMPUTED from MEASURED terrain: for each 0.25° of azimuth, the highest
  * elevation angle at which the DEM blocks the sky, seen from `latDeg, lonDeg`.
  *
  * Rays follow great circles on the reference sphere; every sample's true 3-D
@@ -28,7 +36,7 @@ export function computeHorizon(
   opts: HorizonOptions = {},
 ): HorizonMask {
   const R = map.radiusKm;
-  const maxRange = opts.maxRangeKm ?? map.halfKm * 1.5;
+  const maxRange = opts.maxRangeKm ?? Math.min(map.halfKm * 1.5, MAX_VISIBLE_RANGE_KM);
   const h0 = map.heightAtLatLon(latDeg, lonDeg);
   if (Number.isNaN(h0)) throw new Error("site is outside the heightmap");
   const r0 = R + h0 + (opts.observerHeightKm ?? 0);
@@ -44,7 +52,7 @@ export function computeHorizon(
 
   const mask = new Float32Array(HORIZON_SAMPLES);
   for (let az = 0; az < HORIZON_SAMPLES; az++) {
-    const theta = az * DEG;
+    const theta = az * HORIZON_STEP_DEG * DEG;
     const sinT = Math.sin(theta);
     const cosT = Math.cos(theta);
     let best = -Infinity;

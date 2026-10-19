@@ -48,3 +48,15 @@ export const rotX = (a: number): Mat3 => {
     [0, -s, c],
   ];
 };
+
+export const transpose = (m: Mat3): Mat3 => [
+  [m[0][0], m[1][0], m[2][0]],
+  [m[0][1], m[1][1], m[2][1]],
+  [m[0][2], m[1][2], m[2][2]],
+];
+
+export const cross = (a: Vec3, b: Vec3): Vec3 => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];

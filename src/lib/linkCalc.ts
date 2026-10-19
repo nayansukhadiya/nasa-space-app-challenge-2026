@@ -1,12 +1,22 @@
 import { moonStateAt } from "@/astro/cache";
-import { C_KM_S } from "@/astro/constants";
+import { C_KM_S, EARTH_RADIUS_KM } from "@/astro/constants";
 import { moonState } from "@/astro/frames";
 import type { HorizonMask } from "@/astro/horizon";
-import { type LinkResult, dishGainDb, dopplerHz, linkBudget, rangeRateKmS } from "@/astro/link";
+import {
+  type LinkResult,
+  atmosphericLossDb,
+  dishGainDb,
+  dopplerHz,
+  linkBudget,
+  rangeRateKmS,
+  stationRangeRateKmS,
+} from "@/astro/link";
 import { type RelayOrbit, relayLink } from "@/astro/relay";
 import { type Site } from "@/astro/site";
+import { relativisticShiftHz, shapiroDelayS } from "@/astro/relativity";
+import { stationStates } from "@/astro/stations";
 import { norm, sub } from "@/astro/vec";
-import { earthStatus } from "@/astro/visibility";
+import { type DsnStatus, type StationLink, dsnStatus, earthStatus } from "@/astro/visibility";
 import type { LinkSettings } from "@/store/link";
 
 /** Pointing loss for a fixed pointing error, dB: 12·(err/θ3dB)², with θ3dB ≈ 70·λ/D degrees. */
@@ -25,8 +35,15 @@ export interface DirectionResult {
 }
 
 export interface LiveLink {
-  /** Is there a line of sight for the chosen path (terrain at the mast height, relay occlusion)? */
+  /**
+   * Is there a usable path? Direct: some DSN station clears the site's terrain AND has the Moon above its own 10°
+   * keep-out. Relay: the site sees the relay, the relay sees Earth, and some station has the Moon up.
+   */
   available: boolean;
+  /** Station-by-station visibility from the site (terrain at the mast height). */
+  dsn: DsnStatus;
+  /** The station the link is budgeted to (best mutually visible one), or null when none. */
+  station: StationLink | null;
   /** Earth's centre above the terrain horizon at the mast height. */
   earthVisible: boolean;
   earthElDeg: number;
@@ -38,9 +55,18 @@ export interface LiveLink {
   down: DirectionResult;
   /** Earth → Moon. */
   up: DirectionResult;
+  /** Kinematic Doppler (range rate to the station, including Earth's rotation), Hz. */
   dopplerDownHz: number;
   dopplerUpHz: number;
+  /** Mean general-relativistic clock-rate shift of a lunar carrier, Hz (+ = arrives higher). */
+  relativisticDownHz: number;
+  relativisticUpHz: number;
   rangeRateKmS: number;
+  /** Earth-atmosphere clear-air loss at the station's elevation, dB (applied to the Earth end only). */
+  atmosDownDb: number;
+  atmosUpDb: number;
+  /** Shapiro delay of the path, seconds (GR; ~1e-10 s). */
+  shapiroS: number;
 }
 
 function direction(
@@ -49,6 +75,8 @@ function direction(
   rateKbps: number,
   txEnd: "moon" | "earth",
   hopsKm: Array<{ label: string; km: number; moonToMoon?: boolean }>,
+  /** Extra loss on the hop that ends at Earth (atmosphere), dB. */
+  earthHopLossDb = 0,
 ): DirectionResult {
   const hops = hopsKm.map((h) => {
     // A relay hop is moon-dish ↔ moon-dish; the Earth hop is moon-dish ↔ Earth dish.
@@ -64,7 +92,11 @@ function direction(
       rxGainDb: dishGainDb(rxDish, freqGHz),
       freqGHz,
       distanceKm: h.km,
-      miscLossDb: s.miscLossDb + pointingLossDb(txDish, freqGHz, txErr) + pointingLossDb(rxDish, freqGHz, rxErr),
+      miscLossDb:
+        s.miscLossDb +
+        pointingLossDb(txDish, freqGHz, txErr) +
+        pointingLossDb(rxDish, freqGHz, rxErr) +
+        (h.moonToMoon ? 0 : earthHopLossDb),
       tSysK: rxT,
       dataRateBps: rateKbps * 1000,
       requiredEbN0Db: s.requiredEbN0Db,
@@ -82,14 +114,21 @@ function direction(
 export function computeLink(site: Site, mask: HorizonMask, s: LinkSettings, tMs: number, relay: RelayOrbit | null): LiveLink {
   const st = moonStateAt(tMs);
   const e = earthStatus(st, site, mask);
-  let available = e.visible;
-  let hopsKm: Array<{ label: string; km: number; moonToMoon?: boolean }> = [{ label: "Moon ↔ Earth", km: e.rangeKm }];
-  let pathKm = e.rangeKm;
+  const dsn = dsnStatus(st, site, mask);
+  const stationUp = stationStates(st).some((x) => x.moonElDeg >= 10);
+  // Budget distance: the chosen station when there is one, otherwise the Earth's centre (shown as "would be").
+  const station = dsn.best;
+  const earthHopKm = station ? station.rangeKm : e.rangeKm;
+  let available = dsn.linked;
+  let hopsKm: Array<{ label: string; km: number; moonToMoon?: boolean }> = [
+    { label: station ? `Moon ↔ ${station.name}` : "Moon ↔ Earth", km: earthHopKm },
+  ];
+  let pathKm = earthHopKm;
 
   if (s.path === "relay" && relay) {
     const l = relayLink(relay, site, mask, tMs, st.earthKm);
     const hop2 = norm(sub(st.earthKm, l.posKm));
-    available = l.linked;
+    available = l.linked && stationUp;
     pathKm = l.rangeKm + hop2;
     hopsKm = [
       { label: "Site ↔ relay", km: l.rangeKm, moonToMoon: true },
@@ -97,18 +136,30 @@ export function computeLink(site: Site, mask: HorizonMask, s: LinkSettings, tMs:
     ];
   }
 
-  const rr = rangeRateKmS((off) => moonState(new Date(tMs + off * 1000)), site);
+  const stationEl = station?.moonElAtStationDeg ?? stationStates(st).reduce((m, x) => Math.max(m, x.moonElDeg), 10);
+  const atmosDown = atmosphericLossDb(s.downGHz, stationEl);
+  const atmosUp = atmosphericLossDb(s.upGHz, stationEl);
+
+  const stateAt = (off: number) => moonState(new Date(tMs + off * 1000));
+  const rr = station ? stationRangeRateKmS(stateAt, site, station.id) : rangeRateKmS(stateAt, site);
   return {
     available,
+    dsn,
+    station,
     earthVisible: e.visible,
     earthElDeg: e.elDeg,
     earthAzDeg: e.azDeg,
     pathKm,
     lightTimeMs: (pathKm / C_KM_S) * 1000,
-    down: direction(s, s.downGHz, s.downRateKbps, "moon", hopsKm),
-    up: direction(s, s.upGHz, s.upRateKbps, "earth", hopsKm),
+    down: direction(s, s.downGHz, s.downRateKbps, "moon", hopsKm, atmosDown),
+    up: direction(s, s.upGHz, s.upRateKbps, "earth", hopsKm, atmosUp),
     dopplerDownHz: dopplerHz(s.downGHz, rr),
     dopplerUpHz: dopplerHz(s.upGHz, rr),
+    relativisticDownHz: relativisticShiftHz(s.downGHz),
+    relativisticUpHz: -relativisticShiftHz(s.upGHz), // an Earth carrier is seen from a faster clock: shifted the other way
     rangeRateKmS: rr,
+    atmosDownDb: atmosDown,
+    atmosUpDb: atmosUp,
+    shapiroS: shapiroDelayS(EARTH_RADIUS_KM, st.earthMoonKm, Math.max(1, earthHopKm)),
   };
 }

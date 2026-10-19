@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MOON_RADIUS_KM, RAD } from "@/astro/constants";
-import { horizonElevationDeg } from "@/astro/horizon";
+import { HORIZON_STEP_DEG, horizonElevationDeg, skyViewFactor } from "@/astro/horizon";
 import { CompositeHeightmap } from "./heightmap";
 import { computeHorizon } from "./horizonCompute";
 import { latLonToXY, xyToLatLon } from "./projection";
@@ -44,9 +44,9 @@ describe("horizon mask", () => {
   it("is ~0° everywhere over featureless terrain (curvature drops the ground away)", () => {
     const map = makeSyntheticHeightmap(256, 400, []);
     const mask = computeHorizon(map, -88, 40);
-    for (let az = 0; az < 360; az += 7) {
-      expect(mask[az]).toBeLessThanOrEqual(0.0001);
-      expect(mask[az]).toBeGreaterThan(-0.05);
+    for (let i = 0; i < mask.length; i += 29) {
+      expect(mask[i]).toBeLessThanOrEqual(0.0001);
+      expect(mask[i]).toBeGreaterThan(-0.05);
     }
   });
 
@@ -63,9 +63,9 @@ describe("horizon mask", () => {
     expect(east).toBeLessThan(north / 3);
     // peak azimuth is within a couple of degrees of north
     let peak = 0;
-    for (let a = 1; a < 360; a++) if (mask[a] > mask[peak]) peak = a;
-    const off = Math.min(peak, 360 - peak);
-    expect(off).toBeLessThanOrEqual(2);
+    for (let a = 1; a < mask.length; a++) if (mask[a] > mask[peak]) peak = a;
+    const offDeg = (Math.min(peak, mask.length - peak) * 360) / mask.length;
+    expect(offDeg).toBeLessThanOrEqual(2);
   });
 
   it("matches the analytic elevation of a single peak on a sphere", () => {
@@ -90,6 +90,32 @@ describe("horizon mask", () => {
     expect(max).toBeGreaterThanOrEqual(centre - 0.1);
     expect(max).toBeLessThan(centre + 0.15);
     expect(mask[0]).toBeCloseTo(max, 1); // and it is due north
+  });
+
+  it("samples the sky every 0.25° (1,440 bins), finer than the Sun's 0.53° disc", () => {
+    const map = makeSyntheticHeightmap(256, 400, []);
+    const mask = computeHorizon(map, -88, 40);
+    expect(mask.length).toBe(1440);
+    expect(HORIZON_STEP_DEG).toBe(0.25);
+    expect(HORIZON_STEP_DEG).toBeLessThan(0.53 / 2);
+  });
+
+  it("interpolates between bins and wraps at 360°, for any mask length", () => {
+    const m = new Float32Array(1440);
+    m[1439] = 4;
+    m[0] = 2;
+    expect(horizonElevationDeg(m, 359.875)).toBeCloseTo(3, 6); // half-way between bin 1439 and bin 0
+    expect(horizonElevationDeg(m, -0.125)).toBeCloseTo(3, 6);
+    const legacy = new Float32Array(360);
+    legacy[10] = 1;
+    expect(horizonElevationDeg(legacy, 10)).toBeCloseTo(1, 6);
+    expect(horizonElevationDeg(legacy, 10.5)).toBeCloseTo(0.5, 6);
+  });
+
+  it("sky-view factor is 1 on a plain and falls as the rim rises", () => {
+    expect(skyViewFactor(new Float32Array(1440))).toBeCloseTo(1, 12);
+    expect(skyViewFactor(new Float32Array(1440).fill(30))).toBeCloseTo(0.5, 6); // 1 − sin 30°
+    expect(skyViewFactor(new Float32Array(1440).fill(90))).toBeCloseTo(0, 12);
   });
 
   it("throws when the site is outside the map", () => {

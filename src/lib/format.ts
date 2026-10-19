@@ -29,3 +29,6 @@ export function fmtMinutes(min: number): string {
   if (min >= 120) return `${(min / 60).toFixed(1)} h`;
   return `${Math.round(min)} min`;
 }
+
+/** A 0–1 fraction as a percentage with one decimal. */
+export const fmtPct = (v: number): string => `${(v * 100).toFixed(1)}%`;

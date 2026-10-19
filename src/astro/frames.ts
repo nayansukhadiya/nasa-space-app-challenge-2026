@@ -28,6 +28,10 @@ export interface MoonState {
   readonly earthKm: Vec3;
   /** Earth–Moon centre distance, km. */
   readonly earthMoonKm: number;
+  /** EQJ → Moon-fixed rotation at `time` (lets other bodies, such as ground stations, be expressed in this frame). */
+  readonly q: Mat3;
+  /** Earth centre → Moon centre, EQJ, km. */
+  readonly moonEqjKm: Vec3;
 }
 
 /**
@@ -56,5 +60,7 @@ export function moonState(time: Date): MoonState {
     sunKm: mulMV(q, sunRelEqj),
     earthKm: mulMV(q, earthRelEqj),
     earthMoonKm: Math.hypot(moonKm[0], moonKm[1], moonKm[2]),
+    q,
+    moonEqjKm: moonKm,
   };
 }

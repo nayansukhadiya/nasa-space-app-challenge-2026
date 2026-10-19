@@ -18,7 +18,9 @@ export function Dossier() {
   const sub = useSim((s) => s.subTabs.missions);
   const missions = useWorld((s) => s.missions);
   const m: Mission | undefined = missions.find((x) => x.id === id);
-  const { selectSite, setWindow, setTab, setSubTab } = useSim.getState();
+  // Hooks must run in the same order on every render, so this sits above the early return.
+  const focused = useSim((s) => s.focusedSiteId !== null && s.focusedSiteId === id);
+  const { setWindow, setTab, setSubTab } = useSim.getState();
 
   if (!m) {
     return (
@@ -143,10 +145,20 @@ export function Dossier() {
             onClick={() => {
               setWindow(ms - 20 * DAY, ms + 30 * DAY, ms);
               setTab("illumination");
-              if (plotted) selectSite(m.id);
+              if (plotted) useSim.getState().focusOn(m.id, m.id);
             }}
           >
             Replay at site &amp; date
+          </button>
+        )}
+        {focused && (
+          <button
+            type="button"
+            className="sw-mini-btn"
+            style={{ marginTop: 8 }}
+            onClick={() => useSim.getState().clearFocus()}
+          >
+            Back to overview (Esc)
           </button>
         )}
       </>

@@ -17,6 +17,15 @@ import { makeSyntheticHeightmap } from "@/terrain/synthetic";
 import { dirToScene, sceneToLatLon, surfacePoint } from "./frame";
 import { buildGlobeGeometry } from "./globeGeometry";
 import { buildGrid } from "./graticule";
+import { sitePositionKm } from "@/astro/site";
+import { sub } from "@/astro/vec";
+import { RELAY_PRESETS } from "@/astro/relay";
+import { stationStates } from "@/astro/stations";
+import { useSelectedEntry, useThrottledT } from "@/lib/hooks";
+import { computeLink } from "@/lib/linkCalc";
+import { useMastMask } from "@/lib/useMastMask";
+import { useLink } from "@/store/link";
+import { useBlendedCanvas } from "@/store/layers";
 import { markerBus } from "./markerBus";
 import { Sky } from "./Sky";
 import { buildTerrainGeometry } from "./terrainGeometry";
@@ -101,7 +110,7 @@ function Terrain({
 function Globe({ terrain, holeHalfKm }: { terrain: HeightSource; holeHalfKm: number }) {
   const exaggeration = useSim((s) => s.exaggeration);
   const surface = useSim((s) => s.surface);
-  const canvas = useWorld((s) => s.imageryGlobal.canvas);
+  const canvas = useBlendedCanvas("global");
   const geometry = useMemo(() => buildGlobeGeometry(terrain, exaggeration, holeHalfKm), [terrain, exaggeration, holeHalfKm]);
   const texture = useCanvasTexture(canvas);
   useEffect(() => () => geometry.dispose(), [geometry]);
@@ -289,7 +298,8 @@ function CameraRig({ detailKm, capKm }: { detailKm: number; capKm: number }) {
   const frame = useSim((s) => s.frame);
   const controls = useRef<OrbitControlsImpl>(null);
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
-  const goal = useRef<Pose & { busy: boolean }>({ ty: 0, theta: Math.PI - 1, phi: 0, r: detailKm * 1.5, busy: false });
+  type Goal = Pose & { tx: number; tz: number; busy: boolean };
+  const goal = useRef<Goal>({ ty: 0, tx: 0, tz: 0, theta: Math.PI - 1, phi: 0, r: detailKm * 1.5, busy: false });
   const first = useRef(true);
 
   const place = (target: THREE.Vector3, theta: number, phi: number, r: number) => {
@@ -301,13 +311,21 @@ function CameraRig({ detailKm, capKm }: { detailKm: number; capKm: number }) {
     camera.lookAt(target);
   };
 
-  const current = (): Pose => {
+  const current = (): Goal => {
     const t = controls.current?.target ?? new THREE.Vector3();
     const dx = camera.position.x - t.x;
     const dy = camera.position.y - t.y;
     const dz = camera.position.z - t.z;
     const r = Math.hypot(dx, dy, dz);
-    return { ty: t.y, theta: Math.acos(THREE.MathUtils.clamp(-dy / r, -1, 1)), phi: Math.atan2(-dx, dz), r };
+    return {
+      tx: t.x,
+      tz: t.z,
+      ty: t.y,
+      theta: Math.acos(THREE.MathUtils.clamp(-dy / Math.max(r, 1e-6), -1, 1)),
+      phi: Math.atan2(-dx, dz),
+      r,
+      busy: false,
+    };
   };
 
   const limits = (f: FrameMode): [number, number] =>
@@ -315,7 +333,7 @@ function CameraRig({ detailKm, capKm }: { detailKm: number; capKm: number }) {
 
   useEffect(() => {
     const pose = poseFor(frame, view, detailKm, capKm, camera.fov);
-    goal.current = { ...pose, busy: !first.current };
+    goal.current = { ...pose, tx: 0, tz: 0, busy: !first.current };
     const c = controls.current;
     if (first.current && c) {
       first.current = false;
@@ -332,26 +350,40 @@ function CameraRig({ detailKm, capKm }: { detailKm: number; capKm: number }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, frame, detailKm, capKm, camera]);
 
-  // Google-Earth-style buttons
+  // Google-Earth-style buttons + fly-to
   useEffect(() => {
     // Presses accumulate on the pose we are already heading to, so rapid clicks add up.
-    const base = (): Pose => (goal.current.busy ? goal.current : current());
-    const aim = (patch: Partial<Pose>) => {
+    const base = (): Goal => (goal.current.busy ? goal.current : current());
+    const aim = (patch: Partial<Goal>) => {
       const [lo, hi] = limits(useSim.getState().frame);
       const g = { ...base(), ...patch };
       g.theta = THREE.MathUtils.clamp(g.theta, lo, hi);
       g.r = THREE.MathUtils.clamp(g.r, 5, R * 14);
-      goal.current = { ty: g.ty, theta: g.theta, phi: g.phi, r: g.r, busy: true };
+      goal.current = { tx: g.tx, tz: g.tz, ty: g.ty, theta: g.theta, phi: g.phi, r: g.r, busy: true };
     };
     cameraBus.zoom = (f) => aim({ r: base().r * f });
     cameraBus.tilt = (d) => aim({ theta: base().theta + d });
     cameraBus.turn = (d) => aim({ phi: base().phi + d });
     cameraBus.home = () => {
       const s = useSim.getState();
-      goal.current = { ...poseFor(s.frame, s.view, detailKm, capKm, camera.fov), busy: true };
+      goal.current = { ...poseFor(s.frame, s.view, detailKm, capKm, camera.fov), tx: 0, tz: 0, busy: true };
+    };
+    cameraBus.flyTo = (latDeg, lonDeg, opts) => {
+      const p = surfacePoint(latDeg, lonDeg, 0, 1);
+      const b = base();
+      const wantR = opts?.distanceKm ?? Math.min(b.r, Math.max(60, detailKm * 0.35));
+      aim({
+        tx: p[0],
+        ty: p[1],
+        tz: p[2],
+        r: wantR,
+        // Tip slightly toward the horizon so the focused site reads as terrain, not a top-down map.
+        theta: Math.min(Math.max(b.theta, Math.PI - 1.1), Math.PI - 0.35),
+      });
     };
     return () => {
       cameraBus.zoom = cameraBus.tilt = cameraBus.turn = cameraBus.home = () => {};
+      cameraBus.flyTo = () => {};
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detailKm, capKm, camera]);
@@ -369,13 +401,15 @@ function CameraRig({ detailKm, capKm }: { detailKm: number; capKm: number }) {
     const phi = cur.phi + dphi * k;
     const r = cur.r + (g.r - cur.r) * k;
     const target = c.target;
-    target.set(target.x * (1 - k), target.y + (g.ty - target.y) * k, target.z * (1 - k));
+    target.set(target.x + (g.tx - target.x) * k, target.y + (g.ty - target.y) * k, target.z + (g.tz - target.z) * k);
     place(target, theta, phi, r);
     if (
       Math.abs(g.theta - theta) < 0.002 &&
       Math.abs(dphi) * (1 - k) < 0.002 &&
       Math.abs(g.r - r) < 0.5 + g.r * 0.002 &&
-      Math.abs(g.ty - target.y) < 0.5
+      Math.abs(g.ty - target.y) < 0.5 &&
+      Math.abs(g.tx - target.x) < 0.5 &&
+      Math.abs(g.tz - target.z) < 0.5
     ) {
       g.busy = false;
     }
@@ -540,14 +574,159 @@ function GroundRig() {
   return null;
 }
 
+/**
+ * The link in 3D. A mast stands on the selected site (drawn at a fixed visual scale: a real 5 m mast would be
+ * invisible at this zoom, but its height drives the horizon the physics uses). The beam leaves the mast top toward the
+ * DSN station that can actually hear the site (or Earth's centre when none can), looks faint when blocked, solid when
+ * a link is available and teal when it locks. While the sim runs, pulses travel both ways. The pulse speed is for
+ * the eye only: real light takes 1.28 s to cross 384,000 km.
+ */
+const BEAM_LEN_KM = 900;
+const PULSES = 7;
+
+function SimBeam() {
+  const entry = useSelectedEntry();
+  const tMs = useThrottledT(500);
+  const link = useLink();
+  const relayId = useSim((s) => s.relayId);
+  const orbit = RELAY_PRESETS.find((o) => o.id === relayId) ?? null;
+  const { mask } = useMastMask(entry, link.mastM);
+  const live = useMemo(
+    () => (entry && mask ? computeLink(entry.site, mask, link, tMs, link.path === "relay" ? orbit : null) : null),
+    [entry, mask, link, tMs, orbit],
+  );
+  // The frame loop reads this ref, so React only re-renders on the throttled clock.
+  const state = useRef({ available: false, locked: false, stationId: null as string | null, running: false, mastM: 5 });
+  useEffect(() => {
+    state.current = {
+      available: !!live?.available,
+      locked: !!live && live.available && live.down.locked && live.up.locked,
+      stationId: live?.station?.id ?? null,
+      running: link.running,
+      mastM: link.mastM,
+    };
+  }, [live, link.running, link.mastM]);
+
+  const mast = useRef<THREE.Line>(null);
+  const beam = useRef<THREE.Line>(null);
+  const tip = useRef<THREE.Mesh>(null);
+  const foot = useRef<THREE.Mesh>(null);
+  const beamMat = useRef<THREE.LineBasicMaterial>(null);
+  const pulses = useRef<Array<THREE.Mesh | null>>([]);
+  const mkLine = () => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+    return g;
+  };
+  const mastGeom = useMemo(() => mkLine(), []);
+  const beamGeom = useMemo(() => mkLine(), []);
+  useEffect(
+    () => () => {
+      mastGeom.dispose();
+      beamGeom.dispose();
+    },
+    [mastGeom, beamGeom],
+  );
+
+  useFrame(({ clock }) => {
+    const siteId = useSim.getState().selectedSiteId;
+    const e = siteId ? useWorld.getState().sites[siteId] : undefined;
+    const lm = mast.current;
+    const lb = beam.current;
+    const tp = tip.current;
+    const ft = foot.current;
+    if (!e || !lm || !lb || !tp || !ft) return;
+    const st = state.current;
+    const h = e.site.heightKm ?? 0;
+    const base = surfacePoint(e.site.latDeg, e.site.lonDeg, h, 1);
+    const up = surfacePoint(e.site.latDeg, e.site.lonDeg, h + 1, 1);
+    const ux = up[0] - base[0];
+    const uy = up[1] - base[1];
+    const uz = up[2] - base[2];
+    const mastKm = 4 + st.mastM * 0.2; // visual scale
+    const top: [number, number, number] = [base[0] + ux * mastKm, base[1] + uy * mastKm, base[2] + uz * mastKm];
+
+    const ma = mastGeom.getAttribute("position") as THREE.BufferAttribute;
+    ma.setXYZ(0, base[0], base[1], base[2]);
+    ma.setXYZ(1, top[0], top[1], top[2]);
+    ma.needsUpdate = true;
+    ft.position.set(base[0], base[1], base[2]);
+    tp.position.set(top[0], top[1], top[2]);
+
+    // Aim: the chosen station, else Earth's centre.
+    const sim = moonStateAt(useSim.getState().tMs);
+    const siteKm = sitePositionKm(e.site.latDeg, e.site.lonDeg, h);
+    const target = st.stationId
+      ? (stationStates(sim).find((x) => x.station.id === st.stationId)?.posKm ?? sim.earthKm)
+      : sim.earthKm;
+    const dir = dirToScene(unit(sub(target, siteKm)));
+    const ba = beamGeom.getAttribute("position") as THREE.BufferAttribute;
+    ba.setXYZ(0, top[0], top[1], top[2]);
+    ba.setXYZ(1, top[0] + dir[0] * BEAM_LEN_KM, top[1] + dir[1] * BEAM_LEN_KM, top[2] + dir[2] * BEAM_LEN_KM);
+    ba.needsUpdate = true;
+
+    const t = clock.elapsedTime;
+    const live3 = st.available;
+    if (beamMat.current) {
+      beamMat.current.color.set(st.locked ? "#2fdccf" : "#cfd8d6");
+      beamMat.current.opacity = !live3 ? 0.1 : st.running ? 0.55 + 0.25 * Math.sin(t * 6) : st.locked ? 0.5 : 0.3;
+    }
+    (tp.material as THREE.MeshBasicMaterial).color.set(st.locked ? "#2fdccf" : "#ffffff");
+    tp.scale.setScalar(Math.max(0.6, 1 + (st.running && live3 ? 0.3 * Math.sin(t * 6) : 0)));
+
+    // Pulses: down = Moon→Earth, up = Earth→Moon (reverse), spread along the beam.
+    const show = st.running && live3;
+    for (let i = 0; i < PULSES; i++) {
+      const m = pulses.current[i];
+      if (!m) continue;
+      m.visible = show;
+      if (!show) continue;
+      const down = i % 2 === 0;
+      const phase = (t * 0.35 + i / PULSES) % 1;
+      const f = down ? phase : 1 - phase;
+      m.position.set(top[0] + dir[0] * BEAM_LEN_KM * f, top[1] + dir[1] * BEAM_LEN_KM * f, top[2] + dir[2] * BEAM_LEN_KM * f);
+      const mat = m.material as THREE.MeshBasicMaterial;
+      mat.color.set(down ? "#2fdccf" : "#ffffff");
+      mat.opacity = 0.9 * Math.sin(Math.PI * phase);
+    }
+  });
+
+  return (
+    <>
+      {/* @ts-expect-error R3F line primitive */}
+      <line ref={mast} geometry={mastGeom}>
+        <lineBasicMaterial color="#ffffff" transparent opacity={0.9} depthWrite={false} />
+      </line>
+      {/* @ts-expect-error R3F line primitive */}
+      <line ref={beam} geometry={beamGeom}>
+        <lineBasicMaterial ref={beamMat} transparent opacity={0.22} depthWrite={false} />
+      </line>
+      <mesh ref={foot}>
+        <sphereGeometry args={[0.9, 12, 12]} />
+        <meshBasicMaterial color="#ffffff" transparent opacity={0.7} depthWrite={false} />
+      </mesh>
+      <mesh ref={tip}>
+        <sphereGeometry args={[2.2, 16, 16]} />
+        <meshBasicMaterial color="#ffffff" transparent opacity={0.95} depthWrite={false} />
+      </mesh>
+      {Array.from({ length: PULSES }).map((_, i) => (
+        <mesh key={i} ref={(m) => void (pulses.current[i] = m)} visible={false}>
+          <sphereGeometry args={[1.8, 10, 10]} />
+          <meshBasicMaterial color="#2fdccf" transparent opacity={0.8} depthWrite={false} />
+        </mesh>
+      ))}
+    </>
+  );
+}
+
 export default function MoonScene() {
   const map = useWorld((s) => s.map);
   const wideMap = useWorld((s) => s.wideMap);
   const globalMap = useWorld((s) => s.globalMap);
   const terrain = useWorld((s) => s.terrain);
   const view = useSim((s) => s.view);
-  const imagery = useWorld((s) => s.imagery.canvas);
-  const imageryWide = useWorld((s) => s.imageryWide.canvas);
+  const imagery = useBlendedCanvas("detail");
+  const imageryWide = useBlendedCanvas("wide");
   // With no DEM we draw a flat reference patch of the sphere: honest, and labelled in the UI.
   const flat = useMemo(() => makeSyntheticHeightmap(129, 600, []), []);
   const shown = map ?? flat;
@@ -574,6 +753,7 @@ export default function MoonScene() {
       )}
       {terrain && globalMap && <Globe terrain={terrain} holeHalfKm={holeHalf} />}
       {terrain && view !== "ground" && <Grid terrain={terrain} />}
+      {terrain && view !== "ground" && <SimBeam />}
       <ViewTracker />
       {view === "ground" ? <GroundRig /> : <CameraRig detailKm={detailKm} capKm={capKm} />}
     </Canvas>

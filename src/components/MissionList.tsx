@@ -1,5 +1,6 @@
 "use client";
 
+import { Search } from "lucide-react";
 import { useState } from "react";
 import { OUTCOME_LABEL, type Mission, type Outcome, thumbUrl } from "@/lib/data";
 import { fmtDate } from "@/lib/format";
@@ -35,7 +36,6 @@ function CardPhoto({ src }: { src: string | null }) {
 
 function MissionCard({ m }: { m: Mission }) {
   const selected = useSim((s) => s.selectedMissionId === m.id);
-  const { selectSite, selectMission, setTab } = useSim.getState();
   const plotted = m.lat !== null && m.lon !== null;
   const ms = m.dateUtc ? Date.parse(m.dateUtc) : null;
 
@@ -45,9 +45,11 @@ function MissionCard({ m }: { m: Mission }) {
         type="button"
         className={`sw-card ${selected ? "sw-card-on" : ""}`}
         onClick={() => {
-          selectMission(m.id);
-          if (plotted) selectSite(m.id);
-          setTab("missions");
+          const s = useSim.getState();
+          s.selectMission(m.id);
+          if (plotted) s.focusOn(m.id, m.id);
+          else s.selectSite(null);
+          s.setTab("missions");
         }}
       >
         <CardPhoto src={cardImage(m)} />
@@ -56,7 +58,9 @@ function MissionCard({ m }: { m: Mission }) {
           <span className="sw-row-meta">
             <Flag code={m.country} /> {m.agency}
           </span>
-          <span className="sw-row-meta">{ms ? fmtDate(ms) : "date TBD"}</span>
+          <span className="sw-row-meta">
+            {ms ? fmtDate(ms) : "date TBD"} · {plotted ? "plotted" : "listed"}
+          </span>
         </span>
         <span className={`sw-outcome sw-outcome-${m.outcome}`}>{OUTCOME_LABEL[m.outcome]}</span>
       </button>
@@ -64,42 +68,44 @@ function MissionCard({ m }: { m: Mission }) {
   );
 }
 
-/** Compact archive of cards with real photos; collapses to just its header. */
-export function MissionList() {
+/** The mission archive: search, outcome filter and photo cards. Lives in the Missions tab, not on every screen. */
+export function MissionArchive() {
   const missions = useWorld((s) => s.missions);
-  const open = useSim((s) => s.leftOpen);
   const [filter, setFilter] = useState<Outcome | "all">("all");
-  const rows = missions.filter((m) => filter === "all" || m.outcome === filter);
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const rows = missions.filter(
+    (m) =>
+      (filter === "all" || m.outcome === filter) &&
+      (q === "" || m.name.toLowerCase().includes(q) || m.agency.toLowerCase().includes(q)),
+  );
 
   return (
-    <Glass className="sw-archive" as="aside">
-      <button type="button" className="sw-archive-head" onClick={() => useSim.getState().setLeftOpen(!open)} aria-expanded={open}>
-        <span className="sw-label">Mission archive · {missions.length}</span>
-        <span className="sw-caret">{open ? "–" : "+"}</span>
-      </button>
-      {open && (
-        <>
-          <div className="sw-chips" role="group" aria-label="Filter by outcome">
-            {FILTERS.map((f) => (
-              <button
-                key={f}
-                type="button"
-                className={`sw-chip ${filter === f ? "sw-chip-on" : ""}`}
-                onClick={() => setFilter(f)}
-                aria-pressed={filter === f}
-              >
-                {f === "all" ? "All" : OUTCOME_LABEL[f]}
-              </button>
-            ))}
-          </div>
-          <ul className="sw-rows">
-            {rows.map((m) => (
-              <MissionCard key={m.id} m={m} />
-            ))}
-            {rows.length === 0 && <li className="sw-note sw-pad">No missions match.</li>}
-          </ul>
-        </>
-      )}
+    <Glass className="sw-panel sw2-archive" as="aside">
+      <div className="sw-panel-head">
+        <div>
+          <span className="sw-label">Mission archive</span>
+          <h3 className="sw-site">{missions.length} lunar missions</h3>
+          <div className="sw-coord">Past and planned. Pick one to fly there, replay its date and read its brief.</div>
+        </div>
+      </div>
+      <label className="sw-search">
+        <Search size={13} aria-hidden />
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search missions or agencies" aria-label="Search missions" />
+      </label>
+      <div className="sw-chips" role="group" aria-label="Filter by outcome">
+        {FILTERS.map((f) => (
+          <button key={f} type="button" className={`sw-chip ${filter === f ? "sw-chip-on" : ""}`} onClick={() => setFilter(f)} aria-pressed={filter === f}>
+            {f === "all" ? "All" : OUTCOME_LABEL[f]}
+          </button>
+        ))}
+      </div>
+      <ul className="sw-rows sw2-scroll">
+        {rows.map((m) => (
+          <MissionCard key={m.id} m={m} />
+        ))}
+        {rows.length === 0 && <li className="sw-note sw-pad">No missions match.</li>}
+      </ul>
     </Glass>
   );
 }

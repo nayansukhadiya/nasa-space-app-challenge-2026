@@ -131,7 +131,16 @@ export function relayLink(
   tMs: number,
   earthKm: Vec3,
 ): RelayLink {
-  const posKm = relayPositionFixed(o, tMs);
+  return linkFromPosition(relayPositionFixed(o, tMs), site, mask, earthKm);
+}
+
+/** Same geometry for ANY satellite position (analytic Kepler or a numerically integrated trajectory), Moon-fixed km. */
+export function linkFromPosition(
+  posKm: Vec3,
+  site: Pick<Site, "latDeg" | "lonDeg" | "heightKm">,
+  mask: HorizonMask,
+  earthKm: Vec3,
+): RelayLink {
   const look = lookAngles(posKm, site);
   const siteSeesRelay = look.elDeg > horizonElevationDeg(mask, look.azDeg);
   const relaySeesEarth = !segmentHitsMoon(posKm, earthKm);
@@ -182,6 +191,18 @@ export function relayWindows(
   endMs: number,
   stepMs = 60_000,
 ): RelayWindows {
+  return relayWindowsFrom((t) => relayPositionFixed(o, t), site, mask, startMs, endMs, stepMs);
+}
+
+/** Pass windows for any satellite whose Moon-fixed position is given by `positionAt(tMs)`. */
+export function relayWindowsFrom(
+  positionAt: (tMs: number) => Vec3,
+  site: Site,
+  mask: HorizonMask,
+  startMs: number,
+  endMs: number,
+  stepMs = 60_000,
+): RelayWindows {
   const n = Math.max(1, Math.floor((endMs - startMs) / stepMs));
   const see = new Uint8Array(n);
   const linked = new Uint8Array(n);
@@ -190,7 +211,7 @@ export function relayWindows(
   for (let i = 0; i < n; i++) {
     const t = startMs + i * stepMs;
     const st = moonState(new Date(t));
-    const link = relayLink(o, site, mask, t, st.earthKm);
+    const link = linkFromPosition(positionAt(t), site, mask, st.earthKm);
     const e = lookAngles(st.earthKm, site);
     const dir = e.elDeg > horizonElevationDeg(mask, e.azDeg);
     see[i] = link.siteSeesRelay ? 1 : 0;

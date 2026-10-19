@@ -36,15 +36,23 @@ export const DEFAULT_POWER: PowerParams = {
 
 /**
  * MODELED electrical power from the array, W. Irradiance = solar constant at the Sun's real distance, times the
- * fraction of the solar disc above the terrain horizon, times the cosine of the angle between the Sun and the
- * panel normal (flat: sin el; vertical: cos el · cos Δaz; tracking: 1). Uniform disc, no dust, no temperature
- * derating: an upper bound, not a mission figure.
+ * share of the solar disc above the terrain horizon (limb-darkened, minus any Earth eclipse), times the cosine of
+ * the angle between the Sun and the panel normal (flat: sin el; vertical: cos el · cos Δaz; tracking: 1).
+ * No dust, no temperature derating: an upper bound, not a mission figure.
  */
 export function panelPowerW(
   p: PowerParams,
-  sun: { elDeg: number; azDeg: number; semiDiameterDeg: number; horizonDeg: number; rangeKm: number },
+  sun: {
+    elDeg: number;
+    azDeg: number;
+    semiDiameterDeg: number;
+    horizonDeg: number;
+    rangeKm: number;
+    /** Net light fraction from sunStatus (limb-darkened, eclipse-aware). Falls back to the uniform-disc area. */
+    fraction?: number;
+  },
 ): number {
-  const disc = discVisibleFraction(sun.elDeg, sun.semiDiameterDeg, sun.horizonDeg);
+  const disc = sun.fraction ?? discVisibleFraction(sun.elDeg, sun.semiDiameterDeg, sun.horizonDeg);
   if (disc <= 0) return 0;
   const e = solarIrradiance(sun.rangeKm) * disc;
   const el = (Math.max(sun.elDeg, 0) * Math.PI) / 180;

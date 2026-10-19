@@ -65,6 +65,7 @@ export function SubTabs({
 }
 
 export function Stat({
+  icon,
   label,
   value,
   unit,
@@ -72,6 +73,8 @@ export function Stat({
   status,
   note,
 }: {
+  /** A small icon that says what the reading is about. */
+  icon?: ReactNode;
   label: string;
   value: ReactNode;
   unit?: string;
@@ -83,7 +86,10 @@ export function Stat({
   return (
     <div className="sw-stat">
       <div className="sw-stat-top">
-        <span className="sw-stat-label">{label}</span>
+        <span className="sw-stat-label">
+          {icon && <span className="sw2-stat-icon" aria-hidden>{icon}</span>}
+          {label}
+        </span>
         {tag && <Tag kind={tag} />}
       </div>
       <div className={`sw-stat-value ${status ? "sw-status" : ""}`}>
